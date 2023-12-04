@@ -1,0 +1,174 @@
+esphome:
+  name: "office-mic"
+  friendly_name: "office-mic"
+  on_boot:
+     - priority: -100
+       then:
+         - wait_until: api.connected
+         - delay: 1s
+         - if:
+             condition:
+               switch.is_on: use_wake_word
+             then:
+               - voice_assistant.start_continuous:
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+    version: recommended
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/ssieb/custom_components #Thanks for @ssieb components.
+    components: [ serial ]
+
+# Enable logging
+logger:
+  level: DEBUG
+  baud_rate: 0
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "xxx"
+
+ota:
+  password: "xxx"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Office-Mic Fallback Hotspot"
+    password: "xxx"
+
+captive_portal:
+    
+##### VOICE ASSISTANT #####
+
+i2s_audio:
+  i2s_lrclk_pin: GPIO27
+  i2s_bclk_pin: GPIO26
+
+microphone:
+  - platform: i2s_audio
+    id: mic
+    i2s_din_pin: GPIO13
+    adc_type: external
+  #  channel: right
+    pdm: false
+
+media_player:
+  - platform: i2s_audio
+    id: media_out
+    name: None
+    dac_type: external
+    i2s_dout_pin: GPIO25
+    mode: mono
+
+voice_assistant:
+  microphone: mic
+  use_wake_word: false
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 5.0
+  media_player: media_out
+  id: assist
+  on_tts_end:
+    - media_player.play_media: !lambda return x;
+  on_listening:
+    - light.turn_on:
+        id: led
+        effect: "Slow_pulse"
+  on_end:
+    - light.turn_off:
+        id: led
+    - delay: 100ms
+    - wait_until:
+        not:
+          media_player.is_playing: media_out
+  on_client_connected:
+        then:
+          - voice_assistant.start_continuous:
+  on_client_disconnected:
+        then:
+          - voice_assistant.stop:
+switch:
+  - platform: template
+    name: Use wake word
+    id: use_wake_word
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    on_turn_on:
+      - lambda: id(assist).set_use_wake_word(true);
+      - if:
+          condition:
+            not:
+              - voice_assistant.is_running
+          then:
+            - voice_assistant.start_continuous
+    on_turn_off:
+      - voice_assistant.stop
+      - lambda: id(assist).set_use_wake_word(false);
+  - platform: restart
+    name: "Office mic Restart"
+
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            api.connected:
+          then:
+            - if:
+                condition:
+                  and:
+                    - switch.is_on: use_wake_word
+                    - not:
+                      - voice_assistant.is_running
+                then:
+                  - voice_assistant.start_continuous:
+
+# Light
+light:
+  - platform: rgb
+    id: led
+    red: output_red
+    green: output_green
+    blue: output_blue
+    name: "Office mic LED"
+    effects:
+      - pulse:
+          name: "Slow_pulse"
+          transition_length: 500ms
+          update_interval: 600ms
+          min_brightness: 20%
+          max_brightness: 80%
+      - pulse:
+          name: "Fast_pulse"
+          transition_length: 100ms
+          update_interval: 120ms
+          min_brightness: 20%
+          max_brightness: 80%
+
+output:
+  - platform: ledc
+    pin: GPIO21
+    id: output_green
+    frequency: 100 Hz
+    max_power: 100%
+  - platform: ledc
+    pin: GPIO19
+    id: output_red
+    frequency: 100 Hz
+    max_power: 100%
+  - platform: ledc
+    pin: GPIO18
+    id: output_blue
+    frequency: 100 Hz
+    max_power: 100%
