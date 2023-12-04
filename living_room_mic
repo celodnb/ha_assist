@@ -1,0 +1,348 @@
+esphome:
+  name: living-room-mic
+  friendly_name: living-room-mic
+  on_boot:
+     - priority: -100
+       then:
+         - wait_until: api.connected
+         - delay: 1s
+         - if:
+             condition:
+               switch.is_on: use_wake_word
+             then:
+               - voice_assistant.start_continuous:
+         - uart.write:
+             id: LD1115H_UART_BUS
+             data: !lambda |-
+               std::string th1st = "th1=" + str_sprintf("%.0f",id(LD1115H_TH1).state) +" \n";
+               return std::vector<uint8_t>(th1st.begin(), th1st.end());
+         - uart.write:
+             id: LD1115H_UART_BUS
+             data: !lambda |-
+               std::string th2st = "th2=" + str_sprintf("%.0f",id(LD1115H_TH2).state) +" \n";
+               return std::vector<uint8_t>(th2st.begin(), th2st.end());   
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    version: recommended
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/ssieb/custom_components #Thanks for @ssieb components.
+    components: [ serial ]
+
+# Enable logging
+logger:
+  level: DEBUG
+  baud_rate: 0
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "xxx"
+
+ota:
+  password: "xxx"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Living-Room-Mic Fallback Hotspot"
+    password: "xxx"
+
+captive_portal:
+
+##### VOICE ASSISTANT #####
+
+i2s_audio:
+  i2s_lrclk_pin: GPIO27
+  i2s_bclk_pin: GPIO26
+
+microphone:
+  - platform: i2s_audio
+    id: mic
+    adc_type: external
+    i2s_din_pin: GPIO13
+    pdm: false
+
+voice_assistant:
+  microphone: mic
+  use_wake_word: false
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 10.0
+  id: assist
+  on_listening:
+    - light.turn_on:
+        id: led
+        
+  on_tts_end:
+  - homeassistant.service:
+      service: media_player.play_media
+      data:
+        entity_id: media_player.living_room_speaker #add your media player here
+        media_content_id: !lambda 'return x;'
+        media_content_type: music
+        announce: "true"
+  on_end:
+    - light.turn_off:
+        id: led
+switch:
+  - platform: template
+    name: Use wake word
+    id: use_wake_word
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    on_turn_on:
+      - lambda: id(assist).set_use_wake_word(true);
+      - if:
+          condition:
+            not:
+              - voice_assistant.is_running
+          then:
+            - voice_assistant.start_continuous
+    on_turn_off:
+      - voice_assistant.stop
+      - lambda: id(assist).set_use_wake_word(false);
+    
+##### PRESENCE SENSOR #####
+  - platform: restart
+    name:  Restart
+    id: restart_device
+uart:
+  id: LD1115H_UART_BUS
+  tx_pin: TX
+  rx_pin: RX
+  baud_rate: 115200
+  data_bits: 8
+  stop_bits: 1
+  parity: NONE
+#  debug:
+#    direction: BOTH
+#    dummy_receiver: false
+#    after:
+#      delimiter: "\n"
+#    sequence:
+#      - lambda: UARTDebug::log_string(direction, bytes);
+globals:
+  - id: LD1115H_Last_Time
+    type: time_t
+    restore_value: no
+    initial_value: time(NULL)
+  - id: LD1115H_Last_Mov_Time
+    type: time_t
+    restore_value: no
+    initial_value: time(NULL)
+  - id: LD1115H_Clearence_Status
+    type: bool
+    restore_value: no
+    initial_value: "false"
+interval:
+  - interval: 1s #Clearance Scan Time
+    setup_priority: -200
+    then:
+      lambda: |-
+        if ((time(NULL)-id(LD1115H_Last_Time))>id(LD1115H_Clear_Time).state) {
+          if ((id(LD1115H_Clearence_Status) == false) || (id(LD1115H_Occupancy).state != "Clearance")) {
+            id(LD1115H_Occupancy).publish_state("Clearance");
+            id(LD1115H_Clearence_Status) = true;
+          }
+          if (id(LD1115H_MovOcc_Binary).state == true) {
+            id(LD1115H_MovOcc_Binary).publish_state(false);
+          }
+          if (id(LD1115H_Mov_Binary).state == true) {
+            id(LD1115H_Mov_Binary).publish_state(false);
+          }
+        }
+# Voice assistant interval
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            api.connected:
+          then:
+            - if:
+                condition:
+                  and:
+                    - switch.is_on: use_wake_word
+                    - not:
+                      - voice_assistant.is_running
+                then:
+                  - voice_assistant.start_continuous:
+number:
+  - platform: template
+    name: Living room LD1115H TH1 #TH1 is Movement/Motion Sensitivity
+    id: LD1115H_TH1
+    icon: "mdi:cogs"
+    optimistic: true
+    restore_value: true #If you don't want to store the setting at ESP, set it to false.
+    initial_value: "200" #Default TH1 Setting
+    min_value: 20
+    max_value: 1200
+    step: 10
+    set_action:
+      then:
+        - uart.write:
+            id: LD1115H_UART_BUS
+            data: !lambda |-
+              std::string th1st = "th1=" + str_sprintf("%.0f",x) +" \n";
+              return std::vector<uint8_t>(th1st.begin(), th1st.end());
+  - platform: template
+    name: Living room LD1115H TH2 #TH2 is Occupancy/Presence Sensitivity
+    id: LD1115H_TH2
+    icon: "mdi:cogs"
+    optimistic: true
+    restore_value: true #If you don't want to store the setting at ESP, set it to false.
+    initial_value: "300" #Default TH2 Setting
+    min_value: 50
+    max_value: 2500
+    step: 10
+    set_action:
+      then:
+        - uart.write:
+            id: LD1115H_UART_BUS
+            data: !lambda |-
+              std::string th2st = "th2=" + str_sprintf("%.0f",x) +" \n";
+              return std::vector<uint8_t>(th2st.begin(), th2st.end());
+  - platform: template
+    name: Living room Clearence Time
+    id: LD1115H_Clear_Time
+    icon: "mdi:cogs"
+    optimistic: true
+    restore_value: true #If you don't want to store the setting at ESP, set it to false.
+    initial_value: "15" #LD1115H Mov/Occ > Clearence Time Here
+    min_value: 0.5
+    max_value: 20
+    step: 0.5
+  - platform: template
+    name: Living room Movement Time
+    id: LD1115H_Mov_Time
+    icon: "mdi:cogs"
+    optimistic: true
+    restore_value: true #If you don't want to store the setting at ESP, set it to false.
+    initial_value: "5" #LD1115H Mov > Occ Time Here
+    min_value: 0.5
+    max_value: 10
+    step: 0.5
+sensor:
+  - platform: template
+    name: Living room Spectral line
+    id: LD1115H_Direction
+    icon: "mdi:radar"
+    unit_of_measurement: ""
+    accuracy_decimals: 0
+  - platform: template
+    name: Living room Signal Strength
+    id: LD1115H_Signal
+    icon: "mdi:signal-distance-variant"
+    unit_of_measurement: ""
+    accuracy_decimals: 0
+    filters:    # Use Fliter To Debounce
+    - sliding_window_moving_average:
+        window_size: 8
+        send_every: 2
+    - heartbeat: 0.2s          
+text_sensor:
+  - platform: serial
+    uart_id: LD1115H_UART_BUS
+    name: Living room LD1115H UART Text
+    id: LD1115H_UART_Text
+    icon: "mdi:format-text"
+    internal: False #If Don't Want to See UART Receive Data, Set To True
+    on_value:
+      lambda: |-
+        if (id(LD1115H_UART_Text).state.substr(0,3) == "occ") {
+          id(LD1115H_Signal).publish_state(atof(id(LD1115H_UART_Text).state.substr(7).c_str()));
+          id(LD1115H_Direction).publish_state(atof(id(LD1115H_UART_Text).state.substr(5,2).c_str()));
+          if ((time(NULL)-id(LD1115H_Last_Mov_Time))>id(LD1115H_Mov_Time).state) {
+            id(LD1115H_Occupancy).publish_state("Occupancy");
+            if (id(LD1115H_MovOcc_Binary).state == false) {
+              id(LD1115H_MovOcc_Binary).publish_state(true);
+            }
+            if (id(LD1115H_Mov_Binary).state == true) {
+              id(LD1115H_Mov_Binary).publish_state(false);
+            }
+          }
+          if (id(LD1115H_MovOcc_Binary).state == false) {
+            id(LD1115H_MovOcc_Binary).publish_state(true);
+          }
+          id(LD1115H_Last_Time) = time(NULL);
+          if (id(LD1115H_Clearence_Status) == true) {
+            id(LD1115H_Clearence_Status) = false;
+          }
+        }
+        else if (id(LD1115H_UART_Text).state.substr(0,3) == "mov") {
+          id(LD1115H_Signal).publish_state(atof(id(LD1115H_UART_Text).state.substr(7).c_str()));
+          id(LD1115H_Direction).publish_state(atof(id(LD1115H_UART_Text).state.substr(5,2).c_str()));
+          id(LD1115H_Occupancy).publish_state("Movement");
+          if (id(LD1115H_MovOcc_Binary).state == false) {
+            id(LD1115H_MovOcc_Binary).publish_state(true);
+          }
+          if (id(LD1115H_Mov_Binary).state == false) {
+            id(LD1115H_Mov_Binary).publish_state(true);
+          }
+          id(LD1115H_Last_Mov_Time) = time(NULL);
+          id(LD1115H_Last_Time) = time(NULL);
+          if (id(LD1115H_Clearence_Status) == true) {
+            id(LD1115H_Clearence_Status) = false;
+          }
+        }
+  - platform: template
+    name: Living room Occupancy Status
+    id: LD1115H_Occupancy
+    icon: "mdi:motion-sensor"
+binary_sensor:
+  - platform: template
+    name: Living room presence
+    id: LD1115H_MovOcc_Binary
+    device_class: occupancy
+  - platform: template
+    name: Living room presence Movement
+    id: LD1115H_Mov_Binary
+    device_class: motion
+
+# Light
+light:
+  - platform: rgb
+    id: led
+    red: output_red
+    green: output_green
+    blue: output_blue
+    name: "Living room mic LED"
+    effects:
+      - pulse:
+          name: "Slow_pulse"
+          transition_length: 500ms
+          update_interval: 600ms
+          min_brightness: 20%
+          max_brightness: 80%
+      - pulse:
+          name: "Fast_pulse"
+          transition_length: 100ms
+          update_interval: 120ms
+          min_brightness: 20%
+          max_brightness: 80%
+
+output:
+  - platform: ledc
+    pin: GPIO23
+    id: output_green
+    frequency: 100 Hz
+    max_power: 100%
+  - platform: ledc
+    pin: GPIO19
+    id: output_red
+    frequency: 100 Hz
+    max_power: 100%
+  - platform: ledc
+    pin: GPIO18
+    id: output_blue
+    frequency: 100 Hz
+    max_power: 100%
